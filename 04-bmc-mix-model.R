@@ -2,7 +2,8 @@
 # BMC Comparison: Measured, Concentration Addition, IA
 # Includes individual chemicals and mixtures
 # Author: Kristin Eccles
-# Date: June 2025
+# Date: June 27th, 2025
+# Note: Needs 03-bmc-individual-chem.R to run
 ################################################
 
 library(dplyr)
@@ -17,8 +18,7 @@ MCiter <- 1000
 MIX_FRACTIONS <- na.omit(read.csv("mixing_fractions.csv"))
 tidy_bmc_perc <- left_join(bootstrap_df, MIX_FRACTIONS, by = c("chemical" = "Chemical"))
 
-
-### ---- Function: Concentration Addition ----
+### Function: Concentration Addition ###
 calculate_ca_bmd <- function(df_mixture, mix_cols, MCiter = 10000) {
   results <- list()
 
@@ -58,7 +58,7 @@ calculate_ca_bmd <- function(df_mixture, mix_cols, MCiter = 10000) {
   # Combine results from all mix columns
   bind_rows(results)
 }
-### ---- Function: Approximate IA ----
+### Function: Approximate IA ####
 calculate_ia_bmd <- function(df_mixture, mix_cols, MCiter = 10000) {
   results <- list()
 
@@ -112,10 +112,12 @@ measured <- bmc_mix %>%
   mutate(method = "BMC Measured")
 
 combined_df <- rbind(CA_BMC, IA_BMC, measured)
+combined_model <- rbind(CA_BMC, IA_BMC)
+
 # Export
 write.csv(combined_df, "combined_bmc_IA_CA_Pred.csv", row.names = FALSE)
 
-### ---- Plot: All Chemicals + Mixtures ----
+#### Plot: All Chemicals + Mixtures ####
 
 # Plot
 
@@ -123,12 +125,7 @@ p1 <- ggplot(data = combined_df, aes(y = L1, x = log10(bmd), color = L1)) +
   geom_point(aes(shape = method), size = 3) +
   geom_errorbar(aes(xmin = log10(bmdl), xmax = log10(bmdu)), width = 0.1) +
   theme_bw() +
-  labs(
-    shape = "Model",
-    color = "Mixture",
-    x = "Log10 BMC (uM)",
-    y = "Mixture"
-  )
+  labs(shape = "Model",color = "Mixture", x = "Log10 BMC (uM)", y = "Mixture")
 p1
 
 ggsave("bmc_plot_final_DAIA.tiff", plot = p1, device = "tiff",

@@ -3,8 +3,7 @@
 # Written By: Kristin Eccles
 # CAte: September 22nd, 2022
 # UpCAted: November 8th, 2024
-# Note: Order to run - 2
-# Must run 01-individual_chemical_dr.R first
+# Note: Needs 01-individual_chemical_dr.R to run
 # must have created folder in project called "mix_pred_boot"
 #################################################
 

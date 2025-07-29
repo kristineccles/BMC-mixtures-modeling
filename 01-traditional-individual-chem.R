@@ -2,7 +2,6 @@
 # Mixture Modeling BMCs - individual chems
 # Written By: Kristin Eccles
 # Date: June 11, 2025
-# Note: Order to run - 1
 # Updated July 28th, 2025
 #################################################
 # load libraries

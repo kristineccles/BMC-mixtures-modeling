@@ -2,7 +2,7 @@
 # Mixture Modeling BMCs - individual chems
 # Written By: Kristin Eccles
 # Date: June 11, 2025
-# Note: Order to run - 3 - need 01-traditional-individual-chem.R
+# Note: Needs 01-traditional-individual-chem.R to run
 #################################################
 
 #Load libraries
