@@ -11,6 +11,7 @@ library(reshape2)
 library(tidyr)
 library(truncnorm)
 library(purrr)
+library(ggpmisc)
 
 set.seed(4571)
 MCiter <- 1000
@@ -222,6 +223,8 @@ p4 <- ggplot() +
   )
 p4
 
+ggsave("bootstrapped_bmc_log10_plot.tiff", plot = p4, width = 8, height = 5, dpi = 300)
+
 ##################################################################################
 #### Compare Differences ####
 # Join measured and predicted by mixture and BMR
@@ -232,20 +235,73 @@ comparison_df <- final_preds %>%
     abs_diff = bmd.y - bmd.x
   )
 
-# Plot log10 fold-change
-ggplot(comparison_df, aes(x = BMR, y = log10_diff, color = model.x, shape = model.x)) +
+# Set number of bootstrap iterations
+n_boot <- 1000
+
+# Initialize list to collect results
+boot_results <- list()
+
+# Loop over each row to perform bootstrapping
+for (i in 1:nrow(comparison_df)) {
+
+  pred_mean <- comparison_df$bmd.x[i]
+  pred_lower <- comparison_df$bmdl.x[i]
+  pred_upper <- comparison_df$bmdu.x[i]
+
+  meas_mean <- comparison_df$bmd.y[i]
+  meas_lower <- comparison_df$bmdl.y[i]
+  meas_upper <- comparison_df$bmdu.y[i]
+
+  # Estimate SDs assuming normality
+  pred_sd <- (pred_upper - pred_lower) / (2 * 1.96)
+  meas_sd <- (meas_upper - meas_lower) / (2 * 1.96)
+
+  # Sample from truncated normal distributions
+  pred_samples <- rtruncnorm(n_boot, a = pred_lower, b = pred_upper, mean = pred_mean, sd = pred_sd)
+  meas_samples <- rtruncnorm(n_boot, a = meas_lower, b = meas_upper, mean = meas_mean, sd = meas_sd)
+
+  # Compute log10(predicted / measured)
+  log10_diff <- log10(pred_samples / meas_samples)
+
+  # Store results
+  boot_results[[i]] <- data.frame(
+    log10_diff = log10_diff,
+    model = comparison_df$model.x[i],
+    mixture = comparison_df$mixture[i],
+    BMR = comparison_df$BMR[i]
+  )
+}
+
+# Combine into one dataframe
+boot_df <- bind_rows(boot_results)
+
+# Summarize per group
+summary_stats <- boot_df %>%
+  group_by(model, mixture, BMR) %>%
+  summarise(
+    median_log10_diff = median(log10_diff),
+    lower = quantile(log10_diff, 0.025),
+    upper = quantile(log10_diff, 0.975),
+    .groups = "drop"
+  )
+
+# Plot: log10(Predicted / Measured) with bootstrapped 95% CI
+p6 <- ggplot(summary_stats, aes(x = BMR, y = median_log10_diff, color = model)) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "gray40") +
   geom_point(size = 3) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 1) +
   facet_wrap(~mixture) +
   theme_bw() +
   labs(
     x = "Benchmark Response (%)",
     y = "Log10(Predicted BMC / Measured BMC)",
-    title = "Prediction Error: CA and IA vs Measured BMC"
+    title = "Model Prediction Error with Uncertainty (CA and IA vs Measured)"
   ) +
   scale_color_manual(
     name = "Method",
     values = c("CA" = "#FDE725FF", "IA" = "#2A788EFF"),
     labels = c("CA", "IA")
   )
+p6
 
+ggsave("bootstrapped_bmc_log10diff_plot.png", plot = p6, width = 8, height = 5, dpi = 300)
