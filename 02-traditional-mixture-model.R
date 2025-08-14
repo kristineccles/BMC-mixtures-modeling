@@ -1,8 +1,8 @@
 ################################################
 # Mixtures Modeling for invitro PACs
 # Written By: Kristin Eccles
-# CAte: September 22nd, 2022
-# Updated: November 8th, 2024
+# Date: June 11th, 2025
+# Updated July 28th, 2025
 # Note: Needs 01-individual_chemical_dr.R to run
 # must have created folder in project called "mix_pred_boot"
 #################################################
