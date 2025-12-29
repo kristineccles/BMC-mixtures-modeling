@@ -24,8 +24,6 @@ library(tcplfit2)
 library(tibble)
 
 FIXED_C = 0
-
-set.seed (4540)
 #################################################
 #### Import Data ####
 
@@ -40,6 +38,7 @@ data_unlist$id <- paste(data_unlist$iteration, data_unlist$group, data_unlist$mi
 data_unlist$id2 <- paste(data_unlist$mix, data_unlist$method)
 
 unique(data_unlist$id2)
+
 model_bmd_calc <- list()
 
 for (chem in unique(data_unlist$id)) {
@@ -91,9 +90,6 @@ model_summary <- na.omit(tidy_model) %>%
     bmdl  = quantile(bmd, 0.025),
     bmd_mean = quantile(bmd, 0.50),
     bmdu = quantile(bmd, 0.975),
-    ac10_p5  = quantile(ac10, 0.025),
-    ac10_p50 = quantile(ac10, 0.50),
-    ac10_p95 = quantile(ac10, 0.975)
   )
 
 model_bmd_coeff_edit<- model_summary %>%
@@ -117,12 +113,7 @@ ggplot(tidy_model, aes(x = ac10, y = bmd, color = tp)) +
 model_bmd_coeff_edit$id <- "Traditional"
 model_bmd_coeff_edit$L1 <- model_bmd_coeff_edit$mixture
 
-combined_model <- combined_model %>%
-  separate(method, into = c("method", "model"), sep = " ")
-combined_model$id <- "BMC"
-
-measured$id <- "Measured"
-
+model_bmd_coeff_edit$id2 <- paste(model_bmd_coeff_edit$mixture, model_bmd_coeff_edit$id)
 
 p2 <- ggplot(data = model_bmd_coeff_edit, aes(y = mixture, x = log10(bmd_mean), color = mixture)) +
   geom_point(aes(shape = model), size = 3) +
@@ -131,32 +122,86 @@ p2 <- ggplot(data = model_bmd_coeff_edit, aes(y = mixture, x = log10(bmd_mean), 
   labs(shape = "Model",color = "Mixture", x = "Log10 BMC (uM)", y = "Mixture")
 p2
 
-# combined
-p3 <- ggplot() +
-  #TRADITIONAL
-  geom_point(data = model_bmd_coeff_edit, aes(y = id, x = log10(bmd_mean), color = model), size = 2) +
-  geom_errorbar(data = model_bmd_coeff_edit, aes(
-    y = id,
-    xmin = log10(bmdl), xmax = log10(bmdu),  color = model), width = 0.1) +
+############################################################
 
-  #BMC
-  geom_point(data = combined_model, aes(y = id, x = log10(bmd), color = model), size = 2) +
-  geom_errorbar(data = combined_model, aes(
-    y = id,
-    xmin = log10(bmdl), xmax = log10(bmdu), color = model), width = 0.1) +
 
-  #MEASURED
-  geom_point(data = measured, aes(y = id, x = log10(bmd), color = id), size = 2) +
-  geom_errorbar(data = measured, aes(
-    y = id, xmin = log10(bmdl), xmax = log10(bmdu), color = id), width = 0.1) +
+# 1) Clean / harmonize
+combined_df$source <- "BMC"
+combined_df$mixture <- combined_df$scenario
+combined_df <- combined_df%>%
+  mutate(model = str_split_fixed(method, " ", 2)[,2])
+model_bmd_coeff_edit$source <- "Traditional"
+model_bmd_coeff_edit$method <- paste(model_bmd_coeff_edit$model, "Traditional")
 
-  theme_bw() +
-  facet_grid(.~L1, drop = TRUE)+
-  scale_color_manual(name = "Method",
-                     values =  c("CA" = "#FDE725FF", "GCA" = "#7AD151FF", "IA" = "#2A788EFF", "Measured" = "#5A5A5A"),
-                     labels = c("CA", "GCA", "IA", "Measured"))+
-  labs(x = "Log10 BMC (uM)", y = "Mixture")
-p3
+# Define position dodge to use for both points and error bars
+pd <- position_dodge(width = 0.5)
 
-ggsave("plot_compare_all.tiff", plot = p3, device = "tiff",
-       width = 10, height = 3, units = "in", dpi = 300)
+p_all <- ggplot() +
+  # ---- BMC layer ----
+geom_point(
+  data = combined_df,
+  aes(
+    x = name,
+    y = log10(bmd),
+    color = model,
+    shape = source,
+    group = interaction(model, source)
+  ),
+  size = 3,
+  position = pd
+) +
+  geom_errorbar(
+    data = combined_df,
+    aes(
+      x = name,
+      ymin = log10(bmdl),
+      ymax = log10(bmdu),
+      color = model,
+      group = interaction(model, source)
+    ),
+    width = 0.18,
+    position = pd
+  ) +
+
+  # ---- Traditional layer ----
+geom_point(
+  data = model_bmd_coeff_edit,
+  aes(
+    x = mixture,
+    y = log10(bmd_mean),
+    color = model,
+    shape = source,
+    group = interaction(model, source)
+  ),
+  size = 3,
+  position = pd
+) +
+  geom_errorbar(
+    data = model_bmd_coeff_edit,
+    aes(
+      x = mixture,
+      ymin = log10(bmdl),
+      ymax = log10(bmdu),
+      color = model,
+      group = interaction(model, source)
+    ),
+    width = 0.18,
+    position = pd
+  ) +
+
+  # ---- styling ----
+theme_minimal(base_size = 13) +
+  labs(
+    title = "Mixture BMCs: Traditional vs BMC Variants",
+    x = "Mixture",
+    y = "Log10 BMC (uM)",
+    color = "Model",
+    shape = "Type"
+  ) +
+  theme(
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    axis.text.x = element_text(hjust = 1)
+  ) +
+  coord_flip()
+
+p_all

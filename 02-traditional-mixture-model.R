@@ -1,5 +1,5 @@
 ################################################
-# Mixtures Modeling for invitro PACs
+# 02 Mixtures Modeling for simulated data
 # Written By: Kristin Eccles
 # Date: June 11th, 2025
 # Updated July 28th, 2025
@@ -7,525 +7,403 @@
 # must have created folder in project called "mix_pred_boot"
 #################################################
 
-# load libraries
+# ----------------------------
+# Libraries
+# ----------------------------
 library(MCMCglmm)
+library(drc)
+library(dplyr)
+library(tidyr)
+library(broom)
+library(reshape2)
+library(purrr)
+library(truncnorm)   # rtruncnorm()
+library(scales)      # rescale()
+library(ggplot2)
+library(viridis)
 
+# ----------------------------
 # Set Up
-NUM_PTS <- 1000
-MIN_LOGX <- (-5)
-MAX_LOGX <- 5
+# ----------------------------
+NUM_PTS   <- 100
+MIN_LOGX  <- -5
+MAX_LOGX  <- 5
 
 MAX_Y <- 1
-yVec <- vector(mode="numeric", length = 1000 - 1)
-y <- as.data.frame(MAX_Y * 1:1000 / 1000)
-colnames(y) <-"y"
+yVec  <- vector(mode = "numeric", length = 100 - 1)
+y     <- data.frame(y = MAX_Y * 1:100 / 100)
 
-#set up parameters for CI generation
-MCiter <- 1000
+MCiter <- 100
 
-#set seed for reproducibility
-set.seed(8789)
+# x-grid for forward predictions
+x <- 10^seq(MIN_LOGX, MAX_LOGX, length.out = NUM_PTS)
 
-
-#----------------------------------------------------------------------
-#---------- Refit Curve for CA and IA  ---------
-#----------------------------------------------------------------------
-#need to have the same top and bottom
-#only fit for reduced list
-df$include <- df$Chemicalname %in%  individual_coeff_final$curve
+# ----------------------------
+# Data filter for refits
+# ----------------------------
+df$include <- df$Chemicalname %in% individual_coeff_final$curve
 df_reduced <- subset(df, include == TRUE)
 
-#### Fit Parameters with Selected Model Hill Model ####
-# fit for mixtures modeling
-individual_model2<- drm(MaxResp~Dose_uM, data=df_reduced, curveid = Chemicalname,
-                        type = "continuous",
-                        lowerl = c(-Inf, 0),
-                        upperl = c(0, Inf),
-                        fct=LL.4(fixed=c(NA, FIXED_C , FIXED_D, NA),
-                                 names = c("Slope", "Lower Limit", "Upper Limit", "ED50")))
+# ----------------------------
+# Helpers (DRY!)
+# ----------------------------
+
+# FIXED: robust coef extractor that survives fixed params (missing SEs)
+extract_coefs <- function(model, se_terms = c("Slope", "ED50", "Upper Limit")) {
+  wci <- broom::tidy(model, conf.int = TRUE)
+
+  # estimates wide
+  coef_wide <- wci %>%
+    dplyr::select(term, curve, estimate) %>%
+    tidyr::pivot_wider(names_from = term, values_from = estimate)
+
+  # std.errors wide (may be missing for fixed params)
+  se_wide <- wci %>%
+    dplyr::select(term, curve, std.error) %>%
+    dplyr::mutate(term = paste0("SE_", gsub(" ", "", term))) %>%
+    tidyr::pivot_wider(names_from = term, values_from = std.error)
+
+  # ensure requested SE columns exist
+  needed_se_cols <- paste0("SE_", gsub(" ", "", se_terms))
+  for (nm in needed_se_cols) if (!nm %in% names(se_wide)) se_wide[[nm]] <- NA_real_
+
+  dplyr::left_join(coef_wide, se_wide, by = "curve")
+}
+
+# Truncated-normal bootstrap helper
+boot_truncnorm <- function(m, s, lower, upper, n = MCiter) {
+  rtruncnorm(n = n, a = lower, b = upper, mean = m, sd = s * sqrt(2))
+}
+
+# Summarize to median and 95% CI
+summ_ci <- function(v) {
+  c(mean  = quantile(v, 0.5,   na.rm = TRUE),
+    lower = quantile(v, 0.025,  na.rm = TRUE),
+    upper = quantile(v, 0.975,  na.rm = TRUE))
+}
+
+# Safe CSV writer
+safe_write <- function(df, path) {
+  dir.create(dirname(path), showWarnings = FALSE, recursive = TRUE)
+  write.csv(df, path, row.names = FALSE)
+}
+
+# Mix metadata
+mix_meta <- tibble::tibble(
+  mix = c("EM","EXP1","EXP2","EXP3"),
+  col = c("EM_percent","EXP1_percent","EXP2_percent","EXP3_percent")
+)
+
+# ----------------------------
+# Mixing ratios joiners / tops
+# ----------------------------
+MIX_FRACTIONS <- data.frame(
+  Chemical     = chemical_names,
+  EM_percent   = mix_ratios$EM,
+  EXP1_percent = mix_ratios$EXP1,
+  EXP2_percent = mix_ratios$EXP2,
+  EXP3_percent = mix_ratios$EXP3
+)
+
+# Keep original 'tops' join (as in script)
+tops <- dplyr::left_join(individual_model_coeff, MIX_FRACTIONS, by = c("curve" = "Chemical")) %>% na.omit()
+
+# All four tops come from common_top (as in original)
+EXP3_top <- common_top
+EM_top   <- common_top
+EXP1_top <- common_top
+EXP2_top <- common_top
+tops_lookup <- c(EM = EM_top, EXP1 = EXP1_top, EXP2 = EXP2_top, EXP3 = EXP3_top)
+
+# ----------------------------
+# Refit: Hill model free slope (for IA/CA)
+# ----------------------------
+individual_model2 <- drm(
+  MaxResp ~ Dose_uM, data = df_reduced, curveid = Chemicalname,
+  type = "continuous",
+  lowerl = c(-Inf, 0),
+  upperl = c(0, Inf),
+  fct = LL.4(fixed = c(NA, FIXED_C, FIXED_D, NA),
+             names = c("Slope", "Lower Limit", "Upper Limit", "ED50"))
+)
 summary(individual_model2)
-# Quick Plot of curve fits
 plot(individual_model2)
 
-# Extract coefficients
-individual_model_wCI2 <- tidy(individual_model2, conf.int = TRUE)
-individual_model_coeff2 <- individual_model_wCI2 %>%
-  dplyr::select(term, curve, estimate) %>%
-  tidyr::pivot_wider(names_from = term, values_from = estimate)
+individual_model_coeff2 <- extract_coefs(individual_model2, se_terms = c("Slope", "ED50", "Upper Limit"))
 
-# add SE
-slope_SE2 <- as.data.frame(subset(individual_model_wCI2, term == "Slope")$std.error)
-colnames(slope_SE2) <- "SE_slope"
-EXP2_SE2 <- as.data.frame(subset(individual_model_wCI2, term == "ED50")$std.error)
-colnames(EXP2_SE2) <- "SE_ED50"
-UpperLimit_SE2 <- as.data.frame(subset(individual_model_wCI2, term == "Upper Limit")$std.error)
-colnames(UpperLimit_SE2) <- "SE_UpperLimit"
-individual_model_coeff2 <- cbind(individual_model_coeff2,slope_SE2, EXP2_SE2)
-#write.csv(individual_model_coeff, "individual_model_coeff.csv", row.names = FALSE)
+# Join mixing ratios
+individual_model_coeff2 <- dplyr::left_join(
+  individual_model_coeff2,
+  MIX_FRACTIONS,
+  by = c("curve" = "Chemical")
+)
 
-# Bootstrap for CI
-coeff_final_list2 <- split(individual_model_coeff2, f = individual_model_coeff2$curve)
-slope_boot <- sapply(names(coeff_final_list2), function(x) rtruncnorm(n = MCiter, a = -Inf, b = 0, mean = coeff_final_list2[[x]]$Slope, sd = coeff_final_list2[[x]]$SE_slope*sqrt(2)))
-EXP2_boot <- sapply(names(coeff_final_list2), function(x) rtruncnorm(n = MCiter, a = 0, b = Inf, mean = coeff_final_list2[[x]]$ED50, sd = coeff_final_list2[[x]]$SE_ED50*sqrt(2)))
+# ----------------------------
+# Bootstrap slope & ED50 (for IA/CA)
+# ----------------------------
+coeff_by_chem <- split(individual_model_coeff2, individual_model_coeff2$curve)
+chem_names    <- names(coeff_by_chem)
 
-# Add Mixing Ratios
-MIX_FRACTIONS <- na.omit(read.csv("mixing_fractions.csv"))
-individual_model_coeff2 <- left_join(individual_model_coeff2, MIX_FRACTIONS, by = c("curve" = "Chemical"))
-individual_model_coeff2 <- na.omit(individual_model_coeff2)
+slope_boot <- lapply(chem_names, function(ch) {
+  boot_truncnorm(coeff_by_chem[[ch]]$Slope,  coeff_by_chem[[ch]]$SE_Slope,  lower = -Inf, upper = 0,   n = MCiter)
+}) %>% stats::setNames(chem_names)
 
-tops <- left_join(individual_model_coeff, MIX_FRACTIONS, by = c("curve" = "Chemical"))
-tops <- na.omit(tops)
+ED50_boot <- lapply(chem_names, function(ch) {
+  boot_truncnorm(coeff_by_chem[[ch]]$`ED50`, coeff_by_chem[[ch]]$SE_ED50,   lower = 0,    upper = Inf, n = MCiter)
+}) %>% stats::setNames(chem_names)
 
-#### Bootstrap for CI ####
+slope_boot_m <- reshape2::melt(slope_boot)
+ED50_boot_m  <- reshape2::melt(ED50_boot)
 
-coeff_final_list2 <- split(individual_model_coeff2, f=individual_model_coeff2$curve)
-n <- names(coeff_final_list2)
+bootmat <- data.frame(
+  ED50     = ED50_boot_m[, 1],
+  slope    = slope_boot_m[, 1],
+  chemical = slope_boot_m[, 2],
+  itter    = rep(seq_len(MCiter), times = length(chem_names))
+) %>%
+  dplyr::left_join(
+    individual_model_coeff2 %>% dplyr::select(curve, EM_percent, EXP1_percent, EXP2_percent, EXP3_percent),
+    by = c("chemical" = "curve")
+  ) %>%
+  stats::na.omit()
 
-slope_boot <- sapply(setNames(n, n), FUN = function(x) {
-  rtruncnorm(n = MCiter, a = -Inf, b = 0, mean = coeff_final_list2[[x]]$Slope, sd = coeff_final_list2[[x]]$SE_slope*sqrt(2))},
-  simplify = FALSE,USE.NAMES = TRUE)
-slope_boot_melt <- reshape2::melt(slope_boot)
+bootmat_list <- split(bootmat, bootmat$itter)
 
-EXP2_boot <- sapply(setNames(n, n), FUN = function(x) {
-  rtruncnorm(n = MCiter, a = 0, b = Inf, mean = coeff_final_list2[[x]]$ED50, sd = coeff_final_list2[[x]]$SE_ED50*sqrt(2))},
-  simplify = FALSE,USE.NAMES = TRUE)
-
-EXP2_boot_melt <- reshape2::melt(EXP2_boot)
-
-bootmat <- as.data.frame(cbind(EXP2_boot_melt[,1], slope_boot_melt))
-colnames(bootmat) <- cbind("ED50","slope", "chemical")
-#add iteration number for each chemical
-bootmat$itter <- 1:MCiter
-
-#Mixing Ratios
-MIX_FRACTIONS <- na.omit(read.csv("mixing_fractions.csv"))
-
-#check
+# Sanity checks (kept)
 sum(individual_model_coeff2$EM_percent)
 sum(individual_model_coeff2$EXP1_percent)
 sum(individual_model_coeff2$EXP2_percent)
 sum(individual_model_coeff2$EXP3_percent)
 
-EXP3_top <- weighted.mean(tops$`Upper Limit`, tops$EXP3_percent, na.rm = TRUE)
-EM_top <- weighted.mean(tops$`Upper Limit`, tops$EM_percent, na.rm = TRUE)
-EXP1_top <- weighted.mean(tops$`Upper Limit`, tops$EXP1_percent, na.rm = TRUE)
-EXP2_top <- weighted.mean(tops$`Upper Limit`, tops$EXP2_percent, na.rm = TRUE)
-
-bootmat <- left_join(bootmat, individual_model_coeff2[,c("curve","EM_percent","EXP1_percent",
-                                                         "EXP2_percent", "EXP3_percent")],
-                     by= c("chemical" = "curve"), keep=FALSE )
-#make new dataframe for CI generation
-bootmat_list <- split(bootmat, f=bootmat$itter)
-
-# Refit with slope of -1 for GCA
-individual_model_b1<- drm(MaxResp~Dose_uM, data=df_reduced, curveid= Chemicalname,
-                          type = "continuous",
-                          lowerl = c(0, 0),
-                          upperl = c(100, Inf),
-                          fct=LL.4(fixed=c(FIXED_B, FIXED_C , NA, NA),
-                                   names = c("Slope", "Lower Limit", "Upper Limit", "ED50")))
-
-# Quick Plot of curve fits
+# ----------------------------
+# Refit: slope fixed (GCA)
+# ----------------------------
+individual_model_b1 <- drm(
+  MaxResp ~ Dose_uM, data = df_reduced, curveid = Chemicalname,
+  type = "continuous",
+  lowerl = c(0, 0),
+  upperl = c(100, Inf),
+  fct = LL.4(fixed = c(FIXED_B, FIXED_C, NA, NA),
+             names = c("Slope", "Lower Limit", "Upper Limit", "ED50"))
+)
 plot(individual_model_b1)
 
-# get coefficients
-B1individual_model_wCI <- tidy(individual_model_b1, conf.int = TRUE)
-B1individual_model_wCI
+B1_coefs <- extract_coefs(individual_model_b1, se_terms = c("ED50", "Upper Limit"))
 
-#reorganize
-B1individual_model_coeff <- B1individual_model_wCI%>%
-  dplyr::select(term, curve, estimate) %>%
-  pivot_wider(names_from = term, values_from = estimate)%>%
-  as.data.frame
-B1individual_model_coeff
+B1_by_chem <- split(B1_coefs, B1_coefs$curve)
+B1_names   <- names(B1_by_chem)
 
-# add std. error
-B1EXP2_SE <- as.data.frame(subset(B1individual_model_wCI, term == "ED50")$std.error)
-colnames(B1EXP2_SE) <- "SE_ED50"
+Top_boot <- lapply(B1_names, function(ch) {
+  boot_truncnorm(B1_by_chem[[ch]]$`Upper Limit`, B1_by_chem[[ch]]$SE_UpperLimit, lower = 0, upper = Inf, n = MCiter)
+}) %>% stats::setNames(B1_names)
 
-B1UpperLimit_SE <- as.data.frame(subset(B1individual_model_wCI, term == "Upper Limit")$std.error)
-colnames(B1UpperLimit_SE) <- "SE_UpperLimit"
+B1_ED50_boot <- lapply(B1_names, function(ch) {
+  boot_truncnorm(B1_by_chem[[ch]]$`ED50`, B1_by_chem[[ch]]$SE_ED50, lower = 0, upper = Inf, n = MCiter)
+}) %>% stats::setNames(B1_names)
 
-B1individual_model_coeff <- cbind(B1individual_model_coeff,B1EXP2_SE, B1UpperLimit_SE)
+Top_boot_m     <- reshape2::melt(Top_boot)
+B1_ED50_boot_m <- reshape2::melt(B1_ED50_boot)
 
-#Bootstrap for CIs
-B1coeff_final_list <- split(B1individual_model_coeff, f=B1individual_model_coeff$curve)
-n <- names(B1coeff_final_list)
+B1bootmat <- data.frame(
+  ED50     = B1_ED50_boot_m[, 1],
+  Top      = Top_boot_m[, 1],
+  chemical = Top_boot_m[, 2],
+  itter    = rep(seq_len(MCiter), times = length(B1_names))
+) %>%
+  dplyr::left_join(
+    individual_model_coeff2 %>% dplyr::select(curve, EM_percent, EXP1_percent, EXP2_percent, EXP3_percent),
+    by = c("chemical" = "curve")
+  )
 
-B1Top_boot <- sapply(setNames(n, n), FUN = function(x) {
-  rtnorm(n = MCiter, lower = 0, upper = Inf, mean = B1coeff_final_list[[x]]$`Upper Limit`, sd = B1coeff_final_list[[x]]$SE_UpperLimit*sqrt(2))},
-  simplify = FALSE,USE.NAMES = TRUE)
-B1Top_boot_melt <- reshape2::melt(B1Top_boot)
+B1bootmat_list <- split(B1bootmat, B1bootmat$itter)
 
-B1EXP2_boot <- sapply(setNames(n, n), FUN = function(x) {
-  rtnorm(n = MCiter, lower = 0, upper = Inf, mean =  B1coeff_final_list[[x]]$ED50, sd = B1coeff_final_list[[x]]$SE_ED50*sqrt(2))},
-  simplify = FALSE,USE.NAMES = TRUE)
+# ----------------------------
+# IA predictions (loop over mixes)
+# ----------------------------
+# y(x) = 1 - prod_i [ 1 / (1 + exp(-b_i (log(x*w_i) - ED50_i))) ]
+ia_for_mix <- function(mix_col) {
+  lapply(seq_along(bootmat_list), function(j) {
+    apply(matrix(x), 1, function(xv) {
+      1 - prod(1 / (1 + exp(-bootmat_list[[j]]$slope * (log(xv * bootmat_list[[j]][[mix_col]]) - bootmat_list[[j]]$ED50))))
+    })
+  })
+}
 
-B1EXP2_boot_melt <- reshape2::melt(B1EXP2_boot)
+build_ia_df <- function(mix_name, top_val) {
+  mix_col <- mix_meta$col[mix_meta$mix == mix_name]
+  L       <- ia_for_mix(mix_col)
+  unlist_df <- cbind(x, reshape2::melt(L))
+  colnames(unlist_df) <- c("x", "y", "iteration")
+  unlist_df$mix    <- mix_name
+  unlist_df$method <- "IA"
 
-B1bootmat <- as.data.frame(cbind(B1EXP2_boot_melt[,1], B1Top_boot_melt))
-colnames(B1bootmat) <- cbind("ED50","Top", "chemical")
-#add iteration number for each chemical
-B1bootmat$itter <- 1:MCiter
+  unlist_rescaled <- unlist_df %>% dplyr::mutate(y = scales::rescale(y, to = c(0, top_val)))
+  safe_write(unlist_rescaled, file.path("mix_pred_boot", paste0("unlist_", mix_name, "_CI.csv")))
 
-#add mixing ratios
-B1bootmat <- na.omit(left_join(B1bootmat, individual_model_coeff2[,c("curve","EM_percent","EXP1_percent",
-                                                             "EXP2_percent", "EXP3_percent")],
-                       by= c("chemical" = "curve"), keep=FALSE ))
-#make new dataframe for CI generation
-B1bootmat_list <- split(B1bootmat, f=B1bootmat$itter)
+  ci <- unlist_rescaled %>%
+    dplyr::group_by(x) %>%
+    dplyr::summarise(
+      mean    = quantile(y, 0.5,   na.rm = TRUE),
+      y_lower = quantile(y, 0.025,  na.rm = TRUE),
+      y_upper = quantile(y, 0.975,  na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(dplyr::across(c(mean, y_lower, y_upper), ~ scales::rescale(., to = c(0, top_val)))) %>%
+    as.data.frame()
+  ci$mix_ratio <- mix_name
+  ci
+}
 
-#----------------------------------------------------------------------
-#---------- Predict Mixture Responses  ---------
-#----------------------------------------------------------------------
+IA_list <- purrr::pmap(
+  list(mix_meta$mix, tops_lookup[mix_meta$mix]),
+  build_ia_df
+)
 
-#### Independent Action ####
-IA_EM_CI <-
-  lapply(1:length(bootmat_list), FUN =  function(j) {
-    apply(x, MARGIN = 1, FUN = function(x) {
-      1-prod((1/(1+ (exp(-bootmat_list[[j]]$slope * (log(x*bootmat_list[[j]]$EM_percent) - (bootmat_list[[j]]$ED50)))))))
-    })})
+IA_df <- dplyr::bind_rows(IA_list) %>% dplyr::mutate(Method = "IA")
+safe_write(IA_df, "IA_df.csv")
 
-unlist_EM_CI <- cbind(x,  reshape2::melt(IA_EM_CI))
-colnames(unlist_EM_CI) <- c("x", "y", "iteration")
-unlist_EM_CI$mix <- "EM"
-unlist_EM_CI$method <- "IA"
-
-unlist_EM_CI<- unlist_EM_CI%>%
-  mutate(across(c(y), ~ scales::rescale(., to = c(0, EM_top))))
-
-write.csv(unlist_EM_CI, "mix_pred_boot/unlist_EM_CI.csv", row.names = FALSE)
-
-IA_CI_EM_final <- unlist_EM_CI%>%
-  group_by(x)%>%
-  summarise(mean = quantile(y, 0.5, na.rm =TRUE),
-            y_lower = quantile(y,0.025, na.rm =TRUE),
-            y_upper = quantile(y, 0.975, na.rm =TRUE))%>%
-  mutate(across(c(mean, y_lower, y_upper), ~ scales::rescale(., to = c(0, EM_top))))%>%
-  as.data.frame()
-IA_CI_EM_final$mix_ratio <- "EM"
-
-IA_EXP1_CI <-
-  lapply(1:length(bootmat_list), FUN =  function(j) {
-    apply(x, MARGIN = 1, FUN = function(x) {
-      1-prod((1/(1+ (exp(-bootmat_list[[j]]$slope * (log(x*bootmat_list[[j]]$EXP1_percent) - (bootmat_list[[j]]$ED50)))))))
-    })})
-
-unlist_EXP1_CI <- cbind(x,  reshape2::melt(IA_EXP1_CI))
-colnames(unlist_EXP1_CI) <- c("x", "y", "iteration")
-unlist_EXP1_CI$mix <- "EXP1"
-unlist_EXP1_CI$method <- "IA"
-
-unlist_EXP1_CI<- unlist_EXP1_CI%>%
-  mutate(across(c(y), ~ scales::rescale(., to = c(0, EXP1_top))))
-
-write.csv(unlist_EXP1_CI, "mix_pred_boot/unlist_EXP1_CI.csv", row.names = FALSE)
-
-IA_CI_EXP1_final <- unlist_EXP1_CI%>%
-  group_by(x)%>%
-  summarise(mean = quantile(y,0.5, na.rm =TRUE),
-            y_lower = quantile(y,0.025, na.rm =TRUE),
-            y_upper = quantile(y, 0.975, na.rm =TRUE))%>%
-  mutate(across(c(mean, y_lower, y_upper), ~ scales::rescale(., to = c(0, EXP1_top))))%>%
-  as.data.frame()
-IA_CI_EXP1_final$mix_ratio <- "EXP1"
-
-IA_EXP2_CI <-
-  lapply(1:length(bootmat_list), FUN =  function(j) {
-    apply(x, MARGIN = 1, FUN = function(x) {
-      1-prod((1/(1+ (exp(-bootmat_list[[j]]$slope * (log(x*bootmat_list[[j]]$EXP2_percent) - (bootmat_list[[j]]$ED50)))))))
-    })})
-
-unlist_EXP2_CI <- cbind(x,  reshape2::melt(IA_EXP2_CI))
-colnames(unlist_EXP2_CI) <- c("x", "y", "iteration")
-unlist_EXP2_CI$mix <- "EXP2"
-unlist_EXP2_CI$method <- "IA"
-
-unlist_EXP2_CI<- unlist_EXP2_CI%>%
-  mutate(across(c(y), ~ scales::rescale(., to = c(0, EXP2_top))))
-write.csv(unlist_EXP2_CI, "mix_pred_boot/unlist_EXP2_CI.csv", row.names = FALSE)
-
-IA_CI_EXP2_final <- unlist_EXP2_CI%>%
-  group_by(x)%>%
-  summarise(mean = quantile(y,0.5, na.rm =TRUE),
-            y_lower = quantile(y,0.025, na.rm =TRUE),
-            y_upper = quantile(y, 0.975, na.rm =TRUE))%>%
-  mutate(across(c(mean, y_lower, y_upper), ~ scales::rescale(., to = c(0, EXP2_top))))%>%
-  as.data.frame()
-IA_CI_EXP2_final$mix_ratio <- "EXP2"
-
-IA_EXP3_CI <-
-  lapply(1:length(bootmat_list), FUN =  function(j) {
-    apply(x, MARGIN = 1, FUN = function(x) {
-      1-prod((1/(1+ (exp(-bootmat_list[[j]]$slope * (log(x*bootmat_list[[j]]$EXP3_percent) - (bootmat_list[[j]]$ED50)))))))
-    })})
-
-unlist_EXP3_CI <- cbind(x,  reshape2::melt(IA_EXP3_CI))
-colnames(unlist_EXP3_CI) <- c("x", "y", "iteration")
-unlist_EXP3_CI$mix <- "EXP3"
-unlist_EXP3_CI$method <- "IA"
-
-unlist_EXP3_CI<- unlist_EXP3_CI%>%
-  mutate(across(c(y), ~ scales::rescale(., to = c(0, EXP3_top))))
-write.csv(unlist_EXP3_CI, "mix_pred_boot/unlist_EXP3_CI.csv", row.names = FALSE)
-
-IA_CI_EXP3_final <- unlist_EXP3_CI%>%
-  group_by(x)%>%
-  summarise(mean = quantile(y,0.5, na.rm =TRUE),
-            y_lower = quantile(y,0.025, na.rm =TRUE),
-            y_upper = quantile(y, 0.975, na.rm =TRUE))%>%
-  mutate(across(c(mean, y_lower, y_upper), ~ scales::rescale(., to = c(0, EXP3_top))))%>%
-  as.data.frame()
-IA_CI_EXP3_final$mix_ratio <- "EXP3"
-
-# Combined data frames
-IA_df <- rbind(IA_CI_EM_final, IA_CI_EXP1_final, IA_CI_EXP2_final, IA_CI_EXP3_final)
-IA_df$Method <- "IA"
-write.csv(IA_df, "IA_df.csv", row.names = FALSE)
-
-#plot
-p1adj <- ggplot()+
-  geom_line(data = IA_df, aes(x= log10(x), y = mean, color = mix_ratio), linewidth = 1)+
-  geom_ribbon(data=IA_df, aes(x=log10(x), y= mean, ymin=y_lower, ymax=y_upper, fill = mix_ratio), alpha=0.2) +
-  theme_bw()+
-  labs(x="Log10 Concentration (uM)", y="% Max MeBio Response", color = "Mixing Ratio \nIndependent Action",
-       fill = "Mixing Ratio \nIndependent Action") +
-  scale_fill_viridis(discrete= TRUE)+
-  scale_color_viridis(discrete= TRUE)+
+# Plot IA
+p1adj <- ggplot() +
+  geom_line(data = IA_df, aes(x = log10(x), y = mean, color = mix_ratio), linewidth = 1) +
+  geom_ribbon(data = IA_df, aes(x = log10(x), y = mean, ymin = y_lower, ymax = y_upper, fill = mix_ratio), alpha = 0.2) +
   theme_bw() +
-  theme(legend.title = element_text(face="bold", size=11),
-        axis.title.x = element_text(size=12),
-        axis.title.y = element_text(size=12),
-        plot.title = element_text(size = 16, hjust=0.5))
+  labs(x = "Log10 Concentration (uM)", y = "% Max MeBio Response",
+       color = "Mixing Ratio \nIndependent Action",
+       fill  = "Mixing Ratio \nIndependent Action") +
+  scale_fill_viridis(discrete = TRUE) +
+  scale_color_viridis(discrete = TRUE) +
+  theme(legend.title = element_text(face = "bold", size = 11),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        plot.title   = element_text(size = 16, hjust = 0.5))
 p1adj
 
-#### Concentration Addition ####
-# x = (e^(e *b)* (d/y - 1))^(1/b)
+# ----------------------------
+# CA predictions (loop over mixes)
+# ----------------------------
+# x(y) = sum_i w_i * ( ED50_i * exp( b_i * log((1 - y) / y) ) )
+ca_for_mix <- function(mix_col) {
+  lapply(seq_along(bootmat_list), function(j) {
+    b  <- bootmat_list[[j]]$slope      # can be negative; that's fine
+    w  <- bootmat_list[[j]][[mix_col]]
+    ED <- bootmat_list[[j]]$ED50       # must be > 0
 
-CA_EM_CI <-
-  lapply(1:length(bootmat_list), FUN =  function(j) {
-    apply(y, MARGIN = 1, FUN = function(y) {
-      sum(bootmat_list[[j]]$EM_percent*(bootmat_list[[j]]$ED50 * exp((bootmat_list[[j]]$slope)*log((1-y)/y))))
-    })})
+    apply(as.matrix(y$y), 1, function(yv) {
+      sum( w * ( ED * exp( (1 / b) * log((1 - yv) / yv) ) ) )
+    })
+  })
+}
 
-unlist_CA_EM_CI <- cbind(y,  reshape2::melt(CA_EM_CI))%>%
-  mutate(across(c(y), ~ scales::rescale(., to = c(0, EM_top))))
+build_ca_df <- function(mix_name, top_val) {
+  mix_col <- mix_meta$col[mix_meta$mix == mix_name]
+  L       <- ca_for_mix(mix_col)
+  unlist_df <- cbind(y, reshape2::melt(L)) %>%
+    dplyr::mutate(y = scales::rescale(y, to = c(0, top_val)))
+  colnames(unlist_df) <- c("y", "x", "iteration")
+  unlist_df$mix    <- mix_name
+  unlist_df$method <- "CA"
+  safe_write(unlist_df, file.path("mix_pred_boot", paste0("unlist_CA_", mix_name, "_CI.csv")))
 
-colnames(unlist_CA_EM_CI) <- c("y", "x", "iteration")
-unlist_CA_EM_CI$mix <- "EM"
-unlist_CA_EM_CI$method <- "CA"
-write.csv(unlist_CA_EM_CI, "mix_pred_boot/unlist_CA_EM_CI.csv", row.names = FALSE)
+  ci <- unlist_df %>%
+    dplyr::group_by(y) %>%
+    dplyr::summarise(
+      mean   = quantile(x, 0.5,   na.rm = TRUE),
+      x_lower= quantile(x, 0.025,  na.rm = TRUE),
+      x_upper= quantile(x, 0.975,  na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(y = scales::rescale(y, to = c(0, top_val))) %>%
+    as.data.frame()
+  ci$mix_ratio <- mix_name
+  ci
+}
 
-CA_CI_EM_final <- unlist_CA_EM_CI%>%
-  group_by(y)%>%
-  summarise(mean = quantile(x,0.5, na.rm =TRUE),
-            x_lower = quantile(x,0.025, na.rm =TRUE),
-            x_upper = quantile(x, 0.975, na.rm =TRUE))%>%
-  mutate(across(c(y), ~ scales::rescale(., to = c(0, EM_top))))%>%
-  as.data.frame()
-CA_CI_EM_final$mix_ratio <- "EM"
+CA_list <- purrr::pmap(
+  list(mix_meta$mix, tops_lookup[mix_meta$mix]),
+  build_ca_df
+)
 
-CA_EXP1_CI <-
-  lapply(1:length(bootmat_list), FUN =  function(j) {
-    apply(y, MARGIN = 1, FUN = function(y) {
-      sum(bootmat_list[[j]]$EXP1_percent*(bootmat_list[[j]]$ED50 * exp((bootmat_list[[j]]$slope)*log((1-y)/y))))
-    })})
+CA_df <- dplyr::bind_rows(CA_list) %>% dplyr::mutate(Method = "CA")
+safe_write(CA_df, "CA_df.csv")
 
-unlist_CA_EXP1_CI <- cbind(y,  reshape2::melt(CA_EXP1_CI))%>%
-  mutate(across(c(y), ~ scales::rescale(., to = c(0, EXP1_top))))
-
-colnames(unlist_CA_EXP1_CI) <- c("y", "x", "iteration")
-unlist_CA_EXP1_CI$mix <- "EXP1"
-unlist_CA_EXP1_CI$method <- "CA"
-write.csv(unlist_CA_EXP1_CI, "mix_pred_boot/unlist_CA_EXP1_CI.csv", row.names = FALSE)
-
-CA_CI_EXP1_final <- unlist_CA_EXP1_CI%>%
-  group_by(y)%>%
-  summarise(mean = quantile(x,0.5, na.rm =TRUE),
-            x_lower = quantile(x,0.025, na.rm =TRUE),
-            x_upper = quantile(x, 0.975, na.rm =TRUE))%>%
-  mutate(across(c(y), ~ scales::rescale(., to = c(0, EXP1_top))))%>%
-  as.data.frame()
-CA_CI_EXP1_final$mix_ratio <- "EXP1"
-
-CA_EXP2_CI <-
-  lapply(1:length(bootmat_list), FUN =  function(j) {
-    apply(y, MARGIN = 1, FUN = function(y) {
-      sum(bootmat_list[[j]]$EXP2_percent*(bootmat_list[[j]]$ED50 * exp((bootmat_list[[j]]$slope )*log((1-y)/y))))
-    })})
-
-unlist_CA_EXP2_CI <- cbind(y,  reshape2::melt(CA_EXP2_CI))%>%
-  mutate(across(c(y), ~ scales::rescale(., to = c(0, EXP2_top))))
-
-colnames(unlist_CA_EXP2_CI) <- c("y", "x", "iteration")
-unlist_CA_EXP2_CI$mix <- "EXP2"
-unlist_CA_EXP2_CI$method <- "CA"
-write.csv(unlist_CA_EXP2_CI, "mix_pred_boot/unlist_CA_EXP2_CI.csv", row.names = FALSE)
-
-CA_CI_EXP2_final <- unlist_CA_EXP2_CI%>%
-  group_by(y)%>%
-  summarise(mean = quantile(x,0.5, na.rm =TRUE),
-            x_lower = quantile(x,0.025, na.rm =TRUE),
-            x_upper = quantile(x, 0.975, na.rm =TRUE))%>%
-  mutate(across(c(y), ~ scales::rescale(., to = c(0, EXP2_top))))%>%
-  as.data.frame()
-CA_CI_EXP2_final$mix_ratio <- "EXP2"
-
-CA_EXP3_CI <-
-  lapply(1:length(bootmat_list), FUN =  function(j) {
-    apply(y, MARGIN = 1, FUN = function(y) {
-      sum(bootmat_list[[j]]$EXP3_percent*(bootmat_list[[j]]$ED50 * exp((bootmat_list[[j]]$slope )*log((1-y)/y))))
-    })})
-
-unlist_CA_EXP3_CI <- cbind(y,  reshape2::melt(CA_EXP3_CI))%>%
-  mutate(across(c(y), ~ scales::rescale(., to = c(0, EXP3_top))))
-
-colnames(unlist_CA_EXP3_CI) <- c("y", "x", "iteration")
-unlist_CA_EXP3_CI$mix <- "EXP3"
-unlist_CA_EXP3_CI$method <- "CA"
-write.csv(unlist_CA_EXP3_CI, "mix_pred_boot/unlist_CA_EXP3_CI.csv", row.names = FALSE)
-
-CA_CI_EXP3_final <- unlist_CA_EXP3_CI%>%
-  group_by(y)%>%
-  summarise(mean = quantile(x,0.5, na.rm =TRUE),
-            x_lower = quantile(x,0.025, na.rm =TRUE),
-            x_upper = quantile(x, 0.975, na.rm =TRUE))%>%
-  mutate(across(c(y), ~ scales::rescale(., to = c(0, EXP3_top))))%>%
-  as.data.frame()
-CA_CI_EXP3_final$mix_ratio <- "EXP3"
-
-# Combined dataframes
-CA_df <- rbind(CA_CI_EM_final, CA_CI_EXP1_final, CA_CI_EXP2_final, CA_CI_EXP3_final)
-CA_df$Method <- "CA"
-write.csv(CA_df, "CA_df.csv", row.names = FALSE)
-
-#plot
-p2adj <- ggplot()+
-  geom_line(data = CA_df, aes(x= log10(mean), y = y, color = mix_ratio), linewidth = 1)+
-  geom_ribbon(data = CA_df, aes(x=log10(mean), y = y, xmin=log10(x_lower), xmax=log10(x_upper), fill = mix_ratio), alpha=0.2) +
-  theme_bw()+
-  labs(x="Log10 Concentration (uM)", y="% Max MeBio Response", color = "Mixing Ratio \nConcentration Addition",
-       fill = "Mixing Ratio \nConcentration Addition") +
+# Plot CA
+p2adj <- ggplot() +
+  geom_line(data = CA_df, aes(x = log10(mean), y = y, color = mix_ratio), linewidth = 1) +
+  geom_ribbon(data = CA_df, aes(x = log10(mean), y = y, xmin = log10(x_lower), xmax = log10(x_upper), fill = mix_ratio), alpha = 0.2) +
   theme_bw() +
-  scale_fill_viridis(discrete= TRUE)+
-  scale_color_viridis(discrete= TRUE)+
-  theme(legend.title = element_text(face="bold", size=11),
-        axis.title.x = element_text(size=12),
-        axis.title.y = element_text(size=12),
-        plot.title = element_text(size = 16, hjust=0.5))
+  labs(x = "Log10 Concentration (uM)", y = "% Max MeBio Response",
+       color = "Mixing Ratio \nConcentration Addition",
+       fill  = "Mixing Ratio \nConcentration Addition") +
+  scale_fill_viridis(discrete = TRUE) +
+  scale_color_viridis(discrete = TRUE) +
+  theme(legend.title = element_text(face = "bold", size = 11),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        plot.title   = element_text(size = 16, hjust = 0.5))
 p2adj
 
-#### Generalized Concentration Addition ####
-# GCA Predictions
+# ----------------------------
+# GCA predictions (loop over mixes)
+# ----------------------------
+# y(x) = sum_i Top_i * ((x*w_i)/ED50_i) / [1 + sum_i ((x*w_i)/ED50_i)]
+gca_for_mix <- function(mix_col) {
+  lapply(seq_along(B1bootmat_list), function(j) {
+    apply(matrix(x), 1, function(xv) {
+      num <- sum(B1bootmat_list[[j]]$Top * ((xv * B1bootmat_list[[j]][[mix_col]]) / B1bootmat_list[[j]]$ED50))
+      den <- 1 + sum((xv * B1bootmat_list[[j]][[mix_col]]) / B1bootmat_list[[j]]$ED50)
+      num / den
+    })
+  })
+}
 
-GCA_EM_CI <-
-  lapply(1:length(B1bootmat_list), FUN =  function(j) {
-    apply(x, MARGIN = 1, FUN = function(x) {
-      sum((B1bootmat_list[[j]]$Top)*((x*B1bootmat_list[[j]]$EM_percent)/B1bootmat_list[[j]]$ED50))/
-        (1+sum((x*B1bootmat_list[[j]]$EM_percent)/B1bootmat_list[[j]]$ED50))
-    })})
+build_gca_df <- function(mix_name) {
+  mix_col <- mix_meta$col[mix_meta$mix == mix_name]
+  L       <- gca_for_mix(mix_col)
+  unlist_df <- cbind(x, reshape2::melt(L))
+  colnames(unlist_df) <- c("x", "y", "iteration")
+  unlist_df$mix    <- mix_name
+  unlist_df$method <- "GCA"
+  safe_write(unlist_df, file.path("mix_pred_boot", paste0("unlist_GCA_", mix_name, "_CI.csv")))
 
-unlist_GCA_EM_CI <- cbind(x,  reshape2::melt(GCA_EM_CI))
-colnames(unlist_GCA_EM_CI) <- c("x", "y", "iteration")
-unlist_GCA_EM_CI$mix <- "EM"
-unlist_GCA_EM_CI$method <- "GCA"
-write.csv(unlist_GCA_EM_CI, "mix_pred_boot/unlist_GCA_EM_CI.csv", row.names = FALSE)
+  ci <- unlist_df %>%
+    dplyr::group_by(x) %>%
+    dplyr::summarise(
+      mean  = quantile(y, 0.5,   na.rm = TRUE),
+      lower = quantile(y, 0.025,  na.rm = TRUE),
+      upper = quantile(y, 0.975,  na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    as.data.frame()
+  ci$mix_ratio <- mix_name
+  ci
+}
 
+GCA_list <- purrr::map(mix_meta$mix, build_gca_df)
 
-GCA_CI_EM_final <- unlist_GCA_EM_CI%>%
-  group_by(x)%>%
-  summarise(mean = quantile(y,0.5, na.rm =TRUE),
-            lower = quantile(y,0.025, na.rm =TRUE),
-            upper = quantile(y, 0.975, na.rm =TRUE))%>%
-  as.data.frame()
-GCA_CI_EM_final$mix_ratio <- "EM"
+GCA_df <- dplyr::bind_rows(GCA_list) %>%
+  dplyr::mutate(
+    Method = "GCA",
+    y       = mean,
+    y_lower = lower,
+    y_upper = upper
+  )
 
-GCA_EXP1_CI <-
-  lapply(1:length(B1bootmat_list), FUN =  function(j) {
-    apply(x, MARGIN = 1, FUN = function(x) {
-      sum((B1bootmat_list[[j]]$Top)*((x*B1bootmat_list[[j]]$EXP1_percent)/B1bootmat_list[[j]]$ED50))/
-        (1+sum((x*B1bootmat_list[[j]]$EXP1_percent)/B1bootmat_list[[j]]$ED50))
-    })})
+safe_write(GCA_df, "GCA_df.csv")
 
-unlist_GCA_EXP1_CI <- cbind(x,  reshape2::melt(GCA_EXP1_CI))
-colnames(unlist_GCA_EXP1_CI) <- c("x", "y", "iteration")
-unlist_GCA_EXP1_CI$mix <- "EXP1"
-unlist_GCA_EXP1_CI$method <- "GCA"
-write.csv(unlist_GCA_EXP1_CI, "mix_pred_boot/unlist_GCA_EXP1_CI.csv", row.names = FALSE)
-
-GCA_CI_EXP1_final <- unlist_GCA_EXP1_CI%>%
-  group_by(x)%>%
-  summarise(mean = quantile(y,0.5, na.rm =TRUE),
-            lower = quantile(y,0.025, na.rm =TRUE),
-            upper = quantile(y, 0.975, na.rm =TRUE))%>%
-  as.data.frame()
-GCA_CI_EXP1_final$mix_ratio <- "EXP1"
-
-GCA_EXP2_CI <-
-  lapply(1:length(B1bootmat_list), FUN =  function(j) {
-    apply(x, MARGIN = 1, FUN = function(x) {
-      sum((B1bootmat_list[[j]]$Top)*((x*B1bootmat_list[[j]]$EXP2_percent)/B1bootmat_list[[j]]$ED50))/
-        (1+sum((x*B1bootmat_list[[j]]$EXP2_percent)/B1bootmat_list[[j]]$ED50))
-    })})
-
-unlist_GCA_EXP2_CI <- cbind(x,  reshape2::melt(GCA_EXP2_CI))
-colnames(unlist_GCA_EXP2_CI) <- c("x", "y", "iteration")
-unlist_GCA_EXP2_CI$mix <- "EXP2"
-unlist_GCA_EXP2_CI$method <- "GCA"
-write.csv(unlist_GCA_EXP2_CI, "mix_pred_boot/unlist_GCA_EXP2_CI.csv", row.names = FALSE)
-
-GCA_CI_EXP2_final <- unlist_GCA_EXP2_CI%>%
-  group_by(x)%>%
-  summarise(mean = quantile(y,0.5, na.rm =TRUE),
-            lower = quantile(y,0.025, na.rm =TRUE),
-            upper = quantile(y, 0.975, na.rm =TRUE))%>%
-  as.data.frame()
-GCA_CI_EXP2_final$mix_ratio <- "EXP2"
-
-GCA_EXP3_CI <-
-  lapply(1:length(B1bootmat_list), FUN =  function(j) {
-    apply(x, MARGIN = 1, FUN = function(x) {
-      sum((B1bootmat_list[[j]]$Top)*((x*B1bootmat_list[[j]]$EXP3_percent)/B1bootmat_list[[j]]$ED50))/
-        (1+sum((x*B1bootmat_list[[j]]$EXP3_percent)/B1bootmat_list[[j]]$ED50))
-    })})
-
-unlist_GCA_EXP3_CI <- cbind(x,  reshape2::melt(GCA_EXP3_CI))
-colnames(unlist_GCA_EXP3_CI) <- c("x", "y", "iteration")
-unlist_GCA_EXP3_CI$mix <- "EXP3"
-unlist_GCA_EXP3_CI$method <- "GCA"
-write.csv(unlist_GCA_EXP3_CI, "mix_pred_boot/unlist_GCA_EXP3_CI.csv", row.names = FALSE)
-
-GCA_CI_EXP3_final <- unlist_GCA_EXP3_CI%>%
-  group_by(x)%>%
-  summarise(mean = quantile(y,0.5, na.rm =TRUE),
-            lower = quantile(y,0.025, na.rm =TRUE),
-            upper = quantile(y, 0.975, na.rm =TRUE))%>%
-  as.data.frame()
-GCA_CI_EXP3_final$mix_ratio <- "EXP3"
-
-# Combined dataframes
-GCA_df <- rbind(GCA_CI_EM_final, GCA_CI_EXP1_final, GCA_CI_EXP2_final, GCA_CI_EXP3_final)
-GCA_df$Method <- "GCA"
-
-GCA_df$y <- GCA_df$mean
-GCA_df$y_lower <- GCA_df$lower
-GCA_df$y_upper <- GCA_df$upper
-
-write.csv(GCA_df, "GCA_df.csv", row.names = FALSE)
-
-#plot
-p3adj <- ggplot()+
-  geom_line(data = GCA_df, aes(x= log10(x), y = y, color = mix_ratio), linewidth = 1)+
-  geom_ribbon(data=GCA_df, aes(x=log10(x), y=y, ymin=y_lower, ymax=y_upper, fill = mix_ratio), alpha=0.2) +
-  theme_bw()+
-  labs(x="Log10 Concentration (uM)", y="% Max MeBio Response", color = "Mixing Ratio \nGCA",
-       fill = "Mixing Ratio \nGCA") +
-  scale_fill_viridis(discrete= TRUE)+
-  scale_color_viridis(discrete= TRUE)+
+# Plot GCA
+p3adj <- ggplot() +
+  geom_line(data = GCA_df, aes(x = log10(x), y = y, color = mix_ratio), linewidth = 1) +
+  geom_ribbon(data = GCA_df, aes(x = log10(x), y = y, ymin = y_lower, ymax = y_upper, fill = mix_ratio), alpha = 0.2) +
   theme_bw() +
-  theme(legend.title = element_text(face="bold", size=11),
-        axis.title.x = element_text(size=12),
-        axis.title.y = element_text(size=12),
-        plot.title = element_text(size = 16, hjust=0.5))
+  labs(x = "Log10 Concentration (uM)", y = "% Max MeBio Response",
+       color = "Mixing Ratio \nGCA",
+       fill  = "Mixing Ratio \nGCA") +
+  scale_fill_viridis(discrete = TRUE) +
+  scale_color_viridis(discrete = TRUE) +
+  theme(legend.title = element_text(face = "bold", size = 11),
+        axis.title.x = element_text(size = 12),
+        axis.title.y = element_text(size = 12),
+        plot.title   = element_text(size = 16, hjust = 0.5))
 p3adj
+
 

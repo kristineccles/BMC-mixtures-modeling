@@ -9,12 +9,10 @@ library(ggplot2)
 library(tidyr)
 library(dplyr)
 library(viridis)
-
-# load data
-MIX_FRACTIONS <- na.omit(read.csv("mixing_fractions.csv"))
+library(scales)
 
 #################################################
-#### Pie Plot ####
+#### Contribution Plot ####
 
 # Reshape data to long format
 mixture_long <- pivot_longer(
@@ -28,14 +26,27 @@ mixture_long <- pivot_longer(
 mixture_long$Mixture <- gsub("_percent", "", mixture_long$Mixture)
 
 # Create pie chart using ggplot
-pie_p1 <- ggplot(mixture_long, aes(x = "", y = Percent, fill = Chemical)) +
-  geom_bar(stat = "identity", width = 1) +
-  coord_polar(theta = "y") +
-  facet_wrap(~Mixture) +
+pie_p1 <- ggplot(mixture_long, aes(x = Mixture, y = Percent, fill = Chemical)) +
+  geom_bar(stat = "identity", width = .7) +  # Use your Percent column
   scale_fill_viridis_d(option = "D") +
-  theme_void() +
+  scale_y_continuous(labels = percent_format(scale = 100)) +  # Show % on y-axis
+  theme_minimal() +
   labs(
+    y = "Percent Contribution",
     fill = "Chemical"
   )
 pie_p1
-ggsave("pie_chart.tiff", pie_p1, dpi= 600)
+ggsave("contribution_plot.tiff", pie_p1, dpi= 600)
+
+# Combined Plot:
+
+combined_plot_all <- ggarrange(individual_plot, # from 01
+                               indiv_bmc, # from 03
+                               pie_p1, #above
+                               ncol = 3,
+                               vjust =3,
+                               labels = "AUTO",
+                               common.legend = TRUE,
+                               legend = "bottom")
+combined_plot_all
+ggsave("Background_fig.jpg", combined_plot_all,  height =5, width =10)

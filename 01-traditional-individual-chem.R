@@ -1,5 +1,5 @@
 ################################################
-# Mixture Modeling BMCs - individual chems
+# 01 Mixture Modeling BMCs - individual chems
 # Written By: Kristin Eccles
 # Date: June 11, 2025
 # Updated July 28th, 2025
@@ -20,17 +20,11 @@ library(broom)
 library(viridis)
 library(truncnorm)
 
-# load the data
-# individual chemicals
-df <- read.csv("PAC_responses_6.csv")
-#convert to uM
-df$Dose_uM <- (df$Dose_M*1e6)
-
 # Set Up
 #set up the data frame
-NUM_PTS <- 1000
-MIN_LOGX <- (-5)
-MAX_LOGX <- 5
+NUM_PTS <- 100
+MIN_LOGX <- (-3)
+MAX_LOGX <- 15
 
 xVec <- 1:NUM_PTS
 x <- as.data.frame(10 ^ (MIN_LOGX + ((MAX_LOGX-MIN_LOGX)*xVec/NUM_PTS)))
@@ -39,9 +33,7 @@ colnames(x) <- "x"
 #fixed parameters
 FIXED_C = 0 #lower limit
 FIXED_B = -1 # Slope - increasing slopes are negative in drm
-FIXED_D <- max(df$MaxResp)
-#set seed for reproducibility
-set.seed(2573)
+FIXED_D <- 100
 
 #----------------------------------------------------------------------
 #---------- Curve Fitting for Individual Chemicals  ---------
@@ -117,11 +109,9 @@ ggplot(individual_coeff_final, aes(x = curve, y = log10(ED50), color = curve)) +
   geom_errorbar(aes(ymin = log10(ED50-SE_ED50*1.96), ymax = log10(ED50+SE_ED50*1.96)), width = 0.2) +  # Whiskers
   coord_flip() +
   theme_minimal() +
-  labs(
-    x = "Chemical",
+  labs(x = "Chemical",
     y = "Log10 EC50",
-    color = "Chemical"
-  )
+    color = "Chemical")
 
 #----------------------------------------------------------------------
 #---------- Plotting Curves  ---------
@@ -138,7 +128,7 @@ for(i in unique_chem) {
 
   #model selection
   chem_df <- subset(individual_model_coeff, curve == i)
-  out <- chem_df$`Upper Limit`/(1+ (exp(chem_df$Slope * (log(x) - (chem_df$ED50)))))
+  out <- common_top/(1+ (exp(chem_df$Slope * (log(x) - (chem_df$ED50)))))
   chem_out_df[i] <- out[1]
 
 }
@@ -149,7 +139,8 @@ chem_df_melt <-reshape2::melt(data= chem_out_df, id= "x")
 individual_plot <- ggplot(data= chem_df_melt, aes(x = log10(x), y = value, color = variable))+
   geom_line(linewidth = 1)+
   theme_bw()+
-  labs(x = "Log10 Concentration", y = "% Max MeBio Response", color = "Chemical")
+  scale_color_viridis_d() +
+  labs(x = "Log10 Concentration", y = "% Response", color = "Chemical")
 individual_plot
 
 ggsave(individual_plot, file="individual_curves.jpg", height = 5, width = 5)

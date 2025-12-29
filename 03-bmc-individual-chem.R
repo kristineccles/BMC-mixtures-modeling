@@ -4,93 +4,110 @@
 # Date: June 11, 2025
 # Note: Needs 01-traditional-individual-chem.R to run
 #################################################
-
-#Load libraries
+# Load libraries
 library(tcplfit2)
 library(tidyr)
+library(dplyr)
+library(reshape2)
+library(ggplot2)
 
-df <- read.csv("PAC_responses_6.csv")
-#convert to uM
-df$Dose_uM <- (df$Dose_M*1e6)
-
+# Store results
 model_bmd_calc <- list()
 
-for (chem in unique(df$Chemicalname )) {
+# Loop over chemicals and BMR levels (10–50)
+for (chem in unique(df$Chemicalname)) {
+  chem_data <- df[df$Chemicalname == chem, ]
 
-  # Subset the data for this chemical
-  chem_data <- (df[df$Chemicalname == chem, ])
-  #chem_data <- subset(data_unlist, id %in% chem)
+  for (bmr_val in seq(10, 50, 10)) {
+    row <- list(
+      conc = chem_data$Dose_uM,
+      resp = chem_data$MaxResp,
+      bmed = 0,
+      cutoff = 0,
+      onesd = bmr_val,   # vary BMR
+      assay = "assay",
+      name = chem
+    )
 
-  # Define BMR setup
-  row <- list(
-    conc = chem_data$Dose_uM,
-    resp = chem_data$MaxResp,
-    bmed = 0,        # Baseline centered at 0
-    cutoff = 0,   # cut off for hit call
-    onesd = 10,       #10% increase = BMR but need to set bmr_scale = 1
-    assay = "assay",
-    name = chem
-  )
+    res <- concRespCore(
+      row,
+      fitmodels = c("hill"),
+      conthits = TRUE,
+      aicc = FALSE,
+      bidirectional = FALSE,
+      errfun = "dnorm",
+      bmr_scale = 1
+    )
 
-  # Run Hill model + BMC calculation
-  res <- concRespCore(
-    row,
-    fitmodels = c("hill"),
-    conthits = TRUE,    # This enables BMC calculation
-    aicc = FALSE,
-    bidirectional = FALSE,
-    errfun = "dnorm",
-    bmr_scale = 1
-  )
+    # Add a column to track BMR level
+    res$bmr_level <- paste0("BMC", bmr_val)
 
-  # Store result
-  model_bmd_calc[[chem]] <- res[,c("name", "assay", "bmd", "ac10", "bmdl", "bmdu", "tp")]
+    model_bmd_calc[[paste(chem, bmr_val, sep = "_")]] <-
+      res[, c("name", "assay", "bmd", "bmdl", "bmdu", "tp", "bmr_level")]
+  }
 }
 
-bmd_melt <-reshape2::melt(model_bmd_calc)
+# Fill missing CI with point estimate
+model_bmd_calc <- lapply(model_bmd_calc, function(df) {
+  if (anyNA(df$bmdl)) df$bmdl <- ifelse(is.na(df$bmdl), df$bmd, df$bmdl)
+  if (anyNA(df$bmdu)) df$bmdu <- ifelse(is.na(df$bmdu), df$bmd, df$bmdu)
+  df
+})
 
-# Use dcast to reshape
-tidy_bmc<- na.omit(reshape2::dcast(bmd_melt, L1 ~ variable, value.var = "value"))
-tidy_bmc$include <- tidy_bmc$L1 %in% MIX_FRACTIONS$Chemical
-bmc_individual <- subset(tidy_bmc, include == TRUE)
-bmc_mix <- subset(tidy_bmc, include == FALSE)
-bmc_individual <- left_join(bmc_individual, MIX_FRACTIONS, by = c("L1" = "Chemical"))
+# Melt and reshape
+bmd_melt <- reshape2::melt(model_bmd_calc)
+tidy_bmc <- na.omit(
+  reshape2::dcast(bmd_melt, name + bmr_level ~ variable, value.var = "value")
+)
 
+# Merge with mixing fractions
+bmc_individual <- left_join(tidy_bmc, MIX_FRACTIONS, by = c("name" = "Chemical"))
 
-ggplot(tidy_bmc, aes(x = L1, y = log10(bmd), color = L1)) +
-  geom_point(size = 3) +  # Dot for BMD
-  geom_errorbar(aes(ymin = log10(bmdl), ymax = log10(bmdu)), width = 0.2) +  # Whiskers
+# Plot example for BMC10 only
+indiv_bmc <- ggplot(filter(tidy_bmc, bmr_level == "BMC10"),
+       aes(x = name, y = log10(bmd), color = name)) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = log10(bmdl), ymax = log10(bmdu)), width = 0.2) +
   coord_flip() +
+  scale_color_viridis_d(option = "D") +
   theme_minimal() +
-  labs(
-    x = "Chemical",
-    y = "Log10 BMC",
-    color = "Chemical"
-  )
+  labs(x = "Chemical", y = "Log10 BMC10", color = "Chemical")
 
 ##### Bootstrap ####
 bootstrap_results <- list()
+n_samples <- MCiter
 
-# Number of bootstrap samples
-n_samples <- 1000
-
-# Generate bootstrapped BMDs for each chemical using truncated normal
 for (i in 1:nrow(bmc_individual)) {
-  chem <- bmc_individual$L1[i]
+  chem <- bmc_individual$name[i]
   mean_bmd <- bmc_individual$bmd[i]
   lower <- bmc_individual$bmdl[i]
   upper <- bmc_individual$bmdu[i]
 
-  # Estimate standard deviation (approximate from CI assuming normality)
   est_sd <- (upper - lower) / (2 * 1.96)
 
-  # Generate truncated normal samples
-  bmd_samples <- rtruncnorm(n_samples, a = lower, b = upper, mean = mean_bmd, sd = est_sd)
+  bmd_samples <- rtruncnorm(n_samples, a = lower, b = upper,
+                            mean = mean_bmd, sd = est_sd)
 
-  # Store with chemical name
-  bootstrap_results[[chem]] <- bmd_samples
+  bootstrap_results[[paste0(chem, "_", bmc_individual$bmr_level[i])]] <- bmd_samples
 }
 
 bootstrap_df <- stack(bootstrap_results)
-colnames(bootstrap_df) <- c("bmd_boot", "chemical")
+colnames(bootstrap_df) <- c("bmd_boot", "chemical_bmr")
 
+bootstrap_df <- bootstrap_df %>%
+  # split "Chem1_BMC10" -> chemical = Chem1, bmr_level = BMC10
+  separate(chemical_bmr, into = c("chemical", "bmr_level"), sep = "_(?=[^_]+$)") %>%
+  # clean bmr_level: "BMC10" -> "10"
+  mutate(
+    bmr_level = gsub("BMC", "", bmr_level),
+    bmr_col   = paste0("bmd_boot_", bmr_level)
+  ) %>%
+  group_by(chemical, bmr_col) %>%
+  mutate(iter = row_number()) %>%
+  ungroup() %>%
+  pivot_wider(
+    id_cols = c(chemical, iter),
+    names_from = bmr_col,
+    values_from = bmd_boot
+  ) %>%
+  arrange(chemical, iter)
